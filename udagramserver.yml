@@ -1,0 +1,196 @@
+Description: >
+  Author: Adewuyi Adeyanju
+  This template contain the resources deployed in the UdagramVPC. The resources include the Web Severs, thier security groups, Load Balancer, Autoscalling group
+
+# Initializing Parameters
+Parameters:
+
+  EnvironmentName:
+    Description: This is the environment name that would prefix resourse names of deployws resources
+    Type: String
+
+  AMI: 
+    Description: This is the standard image to be used to create the Web Servers in the Udagram VPC
+    Type: String
+
+# Declaring resources to be deployed
+Resources:
+ # This is Udagram Web Server Security group which allows HTTP (80) and SSH (22) traffic to the Server 
+  UdagramWebSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP Traffic to the Udagram App Web Server 
+      VpcId: 
+        Fn::ImportValue:
+          !Sub "${EnvironmentName}-VPCID"
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 0
+        ToPort: 65535
+        CidrIp: 0.0.0.0/0
+
+# This is the Udagram Load Balancer Security group which allows HTTP traffic to and from the Load Balancer
+  UdagramLBSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http to our load balancer
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${EnvironmentName}-VPCID"
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+
+# This is the Udagram Web Server Launch Configuration
+  UdagramWebAppLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y httpd
+          systemctl start httpd
+          systemctl enable httpd
+          cd /var/www/html
+          aws s3 cp s3://udagram372266084632/index.html .    
+      ImageId: !Ref AMI
+      IamInstanceProfile: UdagramS3FullAccessEC2
+      SecurityGroups:
+      - Ref: UdagramWebSG
+      InstanceType: t3.medium
+      BlockDeviceMappings:
+      - DeviceName: "/dev/sdk"
+        Ebs:
+          VolumeSize: '10'
+
+# This is the Udagram Web Application Autoscalling group        
+  UdagramWebAppGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+      - Fn::ImportValue: 
+          !Sub "${EnvironmentName}-PUB-NETS"
+      LaunchConfigurationName:
+        Ref: UdagramWebAppLaunchConfig
+      MinSize: '4'
+      MaxSize: '4'
+      TargetGroupARNs:
+      - Ref: UdagramWebAppTargetGroup
+
+# This is the Load Balancer for the Udagram Web App Instances
+  UdagramWebAppLB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets:
+      - Fn::ImportValue: !Sub "${EnvironmentName}-PUB1-SN"
+      - Fn::ImportValue: !Sub "${EnvironmentName}-PUB2-SN"
+      SecurityGroups:
+      - Ref: UdagramLBSG
+
+# This is the  Listener  that forwards traffic from the Load Balancer to the Target group     
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn:
+          Ref: UdagramWebAppTargetGroup
+      LoadBalancerArn:
+        Ref: UdagramWebAppLB
+      Port: '80'
+      Protocol: HTTP
+
+# This is the Listener Rule that assesses traffic hiting the Load balancer and act based on the configured rule on the traffic
+  ALBListenerRule:
+      Type: AWS::ElasticLoadBalancingV2::ListenerRule
+      Properties:
+        Actions:
+        - Type: forward
+          TargetGroupArn: !Ref 'UdagramWebAppTargetGroup'
+        Conditions:
+        - Field: path-pattern
+          Values: [/]
+        ListenerArn: !Ref 'Listener'
+        Priority: 1
+
+# This is the target group that contains all the grouped Udagram Web App Instances
+  UdagramWebAppTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 8
+      HealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 5
+      VpcId: 
+        Fn::ImportValue:
+          Fn::Sub: "${EnvironmentName}-VPCID"
+
+  UdagramS3FullAccessEC2:
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      Roles:
+        - UdagramS3FullAccessEC2
+
+
+  JumpboxSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Administrative Access - Allow SSH 
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${EnvironmentName}-VPCID"
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+      - IpProtocol: -1
+        FromPort: -1
+        ToPort: -1
+        CidrIp: 0.0.0.0/0
+
+
+  BastionHost:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: !Ref AMI
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: "true"
+          DeviceIndex: "0"
+          GroupSet: 
+            - Ref: "JumpboxSG"
+          SubnetId: 
+            Fn::ImportValue: !Sub "${EnvironmentName}-PUB1-SN"
+      KeyName: jumpboxKeyPair
+
+
+Outputs:
+
+  UdagramWebLBURL:
+    Value: !GetAtt UdagramWebAppLB.DNSName
+  
+
+  
